@@ -1,0 +1,137 @@
+<!doctype html>
+<!-- Poze de pe telefon → calculator (WebRTC criptat, PeerJS). Pozele nu raman pe niciun server si nici in galeria telefonului. -->
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1d2024">
+<meta name="robots" content="noindex">
+<title>Poze</title>
+<style>
+  :root { --bg:#1d2024; --card:#262a30; --line:#363b43; --text:#e6e3de; --mut:#a29d95; --roz:#7fb3e6; --ok:#7cc79a; --rau:#f2b8b5; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.45 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: 18px 16px 40px; }
+  h1 { font-size: 21px; margin: 0 0 2px; display: flex; align-items: center; gap: 10px; }
+  .logo { width: 38px; height: 38px; border-radius: 10px; background: var(--roz); display: grid; place-items: center; font-size: 20px; }
+  .stare { margin: 14px 0; padding: 12px 14px; border-radius: 12px; background: var(--card); border: 1px solid var(--line); font-size: 16px; }
+  .stare.ok { border-color: var(--ok); } .stare.rau { border-color: var(--rau); }
+  .mare { display: block; width: 100%; padding: 22px 12px; margin: 0 0 12px; border: 0; border-radius: 14px; background: var(--roz); color: #1d2024;
+          font: 700 21px "Segoe UI", system-ui, sans-serif; cursor: pointer; }
+  .mare.al2 { background: var(--card); color: var(--text); border: 1px solid var(--line); font-size: 18px; padding: 16px 12px; }
+  .mare:disabled { opacity: .45; }
+  .mic { background: none; border: 0; color: var(--mut); text-decoration: underline; font: inherit; font-size: 14px; padding: 6px 0; cursor: pointer; }
+  ul { list-style: none; padding: 0; margin: 10px 0 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+  li { position: relative; border-radius: 10px; overflow: hidden; background: var(--card); aspect-ratio: 3 / 4; }
+  li img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  li span { position: absolute; left: 0; right: 0; bottom: 0; padding: 3px 6px; font-size: 13px; background: rgba(0,0,0,.65); }
+  .sub { color: var(--mut); font-size: 14px; }
+  input[type=file] { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1><span class="logo">📷</span> Poze pentru calculator</h1>
+  <div id="stare" class="stare">Pornesc…</div>
+  <div id="corp" hidden>
+    <button class="mare" id="bPoza">📷 Fă o poză</button>
+    <button class="mare al2" id="bGalerie">🖼 Alege din galerie</button>
+    <input id="iPoza" type="file" accept="image/*" capture="environment">
+    <input id="iGalerie" type="file" accept="image/*" multiple>
+    <div class="sub">Fă câte poze vrei – fiecare pleacă singură la calculator. Apoi, la calculator: „Citește-le”.</div>
+    <ul id="lista"></ul>
+  </div>
+  <p><button class="mic" id="bUita" hidden>Leagă alt calculator (scanează din nou codul QR)</button></p>
+</main>
+<script src="peerjs.min.js"></script>
+<script>
+(function () {
+  'use strict';
+  var CHEIE = 'cod_calculator', FORMA = /^[0-9a-f]{32}$/;
+  var $ = function (id) { return document.getElementById(id); };
+  // codul calculatorului: din codul QR (#<32 hex>) → tinut in telefon; il scot din adresa (sa nu ramana in istoric / la distribuire)
+  var dinQR = decodeURIComponent(location.hash.slice(1));
+  if (FORMA.test(dinQR)) { try { localStorage.setItem(CHEIE, dinQR); } catch (e) {} history.replaceState(null, '', location.pathname); }
+  var ID = ''; try { ID = localStorage.getItem(CHEIE) || ''; } catch (e) {}
+  if (!FORMA.test(ID)) ID = FORMA.test(dinQR) ? dinQR : '';
+
+  function stare(t, cls) { var s = $('stare'); s.textContent = t; s.className = 'stare' + (cls ? ' ' + cls : ''); }
+  if (!ID) { stare('Scanează codul QR de pe calculator.', 'rau'); return; }
+  if (!window.Peer) { stare('Nu s-a încărcat pagina complet. Reîncarcă pagina.', 'rau'); return; }
+  $('corp').hidden = false; $('bUita').hidden = false;
+  $('bUita').onclick = function () { if (!confirm('Uit calculatorul ăsta? Va trebui să scanezi din nou codul QR.')) return; try { localStorage.removeItem(CHEIE); } catch (e) {} location.reload(); };
+
+  // ---------- legatura ----------
+  var peer = null, conn = null, legat = false, reincerc = null;
+  function leaga() {
+    clearTimeout(reincerc);
+    if (peer) { try { peer.destroy(); } catch (e) {} }
+    legat = false; stare('Mă leg de calculator…');
+    peer = new Peer();
+    peer.on('open', function () {
+      conn = peer.connect(ID, { reliable: true, serialization: 'binary' });
+      conn.on('open', function () { legat = true; stare('✓ Legat de calculator. Poți face poze.', 'ok'); trimiteUrmatoarea(); });
+      conn.on('data', function (m) { if (m && m.t === 'primit') primit(m.id); });
+      conn.on('close', function () { cadere('S-a întrerupt legătura.'); });
+      conn.on('error', function () { cadere('S-a întrerupt legătura.'); });
+    });
+    peer.on('error', function (e) {
+      if (e && e.type === 'peer-unavailable') cadere('Calculatorul nu răspunde: pornește legătura pe calculator.');
+      else if (e && (e.type === 'network' || e.type === 'server-error' || e.type === 'socket-error' || e.type === 'socket-closed')) cadere('Nu am internet / serverul de legătură nu răspunde.');
+      else cadere('Eroare la legătură (' + (e && e.type || e) + ').');
+    });
+  }
+  function cadere(t) {
+    if (!legat && reincerc) return;
+    legat = false; coada.forEach(function (p) { if (p.st === 'trimit') { p.st = 'astept'; arataPoza(p); } });
+    stare(t + ' Reîncerc singur…', 'rau'); clearTimeout(reincerc); reincerc = setTimeout(function () { reincerc = null; leaga(); }, 8000);
+  }
+  document.addEventListener('visibilitychange', function () { if (!document.hidden && !legat) leaga(); }); // telefonul a stat blocat
+
+  // ---------- pozele ----------
+  var coada = [], nr = 0, trimit = false;
+  async function micsoreaza(f) { // max 3000 px pe latura lunga (destul pentru citit), JPEG – mai repede pe date mobile
+    var b = await createImageBitmap(f, { imageOrientation: 'from-image' });
+    var k = Math.min(1, 3000 / Math.max(b.width, b.height)), c = document.createElement('canvas');
+    c.width = Math.round(b.width * k); c.height = Math.round(b.height * k);
+    c.getContext('2d').drawImage(b, 0, 0, c.width, c.height); b.close && b.close();
+    return new Promise(function (ok) { c.toBlob(ok, 'image/jpeg', 0.92); });
+  }
+  function adauga(fisiere) {
+    [].slice.call(fisiere).forEach(function (f) {
+      if (!/^image\//.test(f.type)) return;
+      var p = { id: Date.now() + '-' + (++nr), nume: 'telefon ' + new Date().toTimeString().slice(0, 8).replace(/:/g, '.') + ' ' + nr + '.jpg', st: 'pregatesc', url: URL.createObjectURL(f), el: null };
+      coada.push(p); arataPoza(p);
+      micsoreaza(f).then(function (blob) { p.blob = blob; p.st = 'astept'; arataPoza(p); trimiteUrmatoarea(); })
+        .catch(function () { p.st = 'rau'; arataPoza(p); });
+    });
+  }
+  function arataPoza(p) {
+    if (!p.el) { p.el = document.createElement('li'); var im = document.createElement('img'); im.src = p.url; im.alt = ''; p.el.append(im, document.createElement('span')); $('lista').prepend(p.el); }
+    p.el.querySelector('span').textContent = { pregatesc: '…', astept: '⏳ în așteptare', trimit: '⬆ se trimite', gata: '✓ la calculator', rau: '✗ nu merge' }[p.st];
+  }
+  async function trimiteUrmatoarea() {
+    if (trimit || !legat || !conn) return;
+    var p = coada.find(function (x) { return x.st === 'astept'; }); if (!p) return;
+    trimit = true; p.st = 'trimit'; arataPoza(p);
+    try { conn.send({ t: 'poza', id: p.id, nume: p.nume, tip: 'image/jpeg', date: await p.blob.arrayBuffer() }); }
+    catch (e) { p.st = 'astept'; arataPoza(p); trimit = false; cadere('Nu am putut trimite.'); return; }
+    p.timp = setTimeout(function () { if (p.st === 'trimit') { p.st = 'astept'; arataPoza(p); trimit = false; trimiteUrmatoarea(); } }, 120000);
+  }
+  function primit(id) {
+    var p = coada.find(function (x) { return x.id === id; }); if (!p) return;
+    clearTimeout(p.timp); p.st = 'gata'; p.blob = null; arataPoza(p); trimit = false; // poza nu mai e tinuta in telefon
+    var n = coada.filter(function (x) { return x.st === 'gata'; }).length;
+    stare('✓ ' + n + (n === 1 ? ' poză ajunsă' : ' poze ajunse') + ' la calculator.', 'ok');
+    trimiteUrmatoarea();
+  }
+  $('bPoza').onclick = function () { $('iPoza').click(); };
+  $('bGalerie').onclick = function () { $('iGalerie').click(); };
+  $('iPoza').onchange = $('iGalerie').onchange = function () { adauga(this.files); this.value = ''; };
+  window.addEventListener('beforeunload', function (e) { if (coada.some(function (x) { return x.st !== 'gata' && x.st !== 'rau'; })) { e.preventDefault(); e.returnValue = ''; } });
+  window.__tel = { adauga: adauga, coada: function () { return coada; } }; // pentru teste
+  leaga();
+})();
+</script>
+</body>
+</html>
